@@ -5,32 +5,40 @@
  * 
  * Este script corre 100% GRATIS en tu cuenta de Google Drive.
  * Al ejecutarse, creará o usará automáticamente una hoja de cálculo llamada
- * "FC27_Rivales" en tu Google Drive para guardar todos tus rivales y partidos.
- * 
- * INSTRUCCIONES DE INSTALACIÓN EN 1 MINUTO:
- * 1. Ve a Google Drive (https://drive.google.com) y crea una nueva "Hoja de cálculo de Google".
- *    (O puedes ir directamente a https://script.google.com para crear un nuevo proyecto).
- * 2. En el menú superior de la hoja, haz clic en: Extensiones > Apps Script.
- * 3. Borra todo el código que aparezca y pega TODO el contenido de este archivo.
- * 4. Arriba a la derecha, haz clic en el botón azul "Implementar" (Deploy) > "Nueva implementación" (New deployment).
- * 5. Haz clic en el ícono de engranaje (⚙️) al lado de "Seleccionar tipo" y elige: "Aplicación web" (Web app).
- * 6. Configura lo siguiente:
- *    - Descripción: FC 27 Tracker API
- *    - Ejecutar como (Execute as): "Yo" (tu cuenta de correo)
- *    - Quién tiene acceso (Who has access): "Cualquier usuario" (Anyone)
- *      *(IMPORTANTE: Seleccionar "Cualquier usuario" permite que tu app web en React pueda leer y guardar datos).*
- * 7. Haz clic en "Implementar" (Deploy). Google te pedirá autorizar permisos una sola vez.
- * 8. Copia la "URL de la aplicación web" (termina en /exec) y pégala en la app en React.
- * ¡Listo! Todos tus partidos quedarán guardados en tu Google Drive.
+ * "Rivales_FC27" en tu Google Drive para guardar todos tus rivales y partidos.
  */
 
 const SHEET_NAME = 'Rivales_FC27';
 
 function getOrCreateSheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let ss = null;
+  try {
+    ss = SpreadsheetApp.getActiveSpreadsheet();
+  } catch (e) {
+    ss = null;
+  }
+
+  // Si no está vinculado a una hoja abierta, buscar o crear en Drive
+  if (!ss) {
+    const files = DriveApp.getFilesByName('FC27_Rivales_Data');
+    if (files.hasNext()) {
+      ss = SpreadsheetApp.open(files.next());
+    } else {
+      ss = SpreadsheetApp.create('FC27_Rivales_Data');
+    }
+  }
+
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAME);
+    // Si la hoja por defecto está vacía, renombrarla, o crear una nueva
+    const defaultSheet = ss.getActiveSheet();
+    if (defaultSheet && defaultSheet.getLastRow() === 0) {
+      sheet = defaultSheet;
+      sheet.setName(SHEET_NAME);
+    } else {
+      sheet = ss.insertSheet(SHEET_NAME);
+    }
+
     // Configurar encabezados con estilo profesional
     const headers = [
       'Gamertag / Nombre',
@@ -46,7 +54,6 @@ function getOrCreateSheet() {
     ];
     sheet.appendRow(headers);
     
-    // Dar formato a los encabezados
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
     headerRange.setBackground('#0f172a');
     headerRange.setFontColor('#00ff87');
@@ -62,10 +69,13 @@ function getOrCreateSheet() {
 // -------------------------------------------------------------
 function doGet(e) {
   try {
-    const action = e.parameter.action || 'get_all';
+    const action = (e && e.parameter && e.parameter.action) ? e.parameter.action : 'get_all';
     
     if (action === 'ping') {
-      return responseJSON({ status: 'success', message: 'Conectado exitosamente con Google Drive' });
+      return responseJSON({ 
+        status: 'success', 
+        message: 'Conectado exitosamente con Google Drive' 
+      });
     }
 
     const sheet = getOrCreateSheet();
@@ -75,7 +85,7 @@ function doGet(e) {
     // Fila 0 es encabezado, empezamos en 1
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
-      if (!row[0]) continue; // Saltear filas vacías
+      if (!row[0]) continue;
 
       let history = [];
       try {
@@ -113,17 +123,19 @@ function doGet(e) {
 function doPost(e) {
   try {
     let body;
-    if (e.postData && e.postData.contents) {
+    if (e && e.postData && e.postData.contents) {
       body = JSON.parse(e.postData.contents);
-    } else {
+    } else if (e && e.parameter) {
       body = e.parameter;
+    } else {
+      body = {};
     }
 
     const action = body.action || 'save_match';
     const sheet = getOrCreateSheet();
 
     if (action === 'save_match') {
-      const match = body.match; // { name, result: 'W'|'L'|'D', note, date }
+      const match = body.match;
       if (!match || !match.name) {
         return responseJSON({ status: 'error', message: 'Falta el nombre del jugador' });
       }
@@ -135,17 +147,16 @@ function doPost(e) {
 
       for (let i = 1; i < rows.length; i++) {
         if (String(rows[i][0]).trim().toLowerCase() === searchKey) {
-          rowIndex = i + 1; // 1-based index in Sheet
+          rowIndex = i + 1;
           break;
         }
       }
 
       const matchDate = match.date || new Date().toISOString();
       const matchNote = match.note || '';
-      const matchResult = match.result; // 'W' = Win, 'L' = Loss, 'D' = Draw
+      const matchResult = match.result;
 
       if (rowIndex !== -1) {
-        // Actualizar jugador existente
         const currentRow = rows[rowIndex - 1];
         let wins = Number(currentRow[1]) || 0;
         let losses = Number(currentRow[2]) || 0;
@@ -171,7 +182,6 @@ function doPost(e) {
           note: matchNote
         });
 
-        // Actualizar fila
         sheet.getRange(rowIndex, 2).setValue(wins);
         sheet.getRange(rowIndex, 3).setValue(losses);
         sheet.getRange(rowIndex, 4).setValue(draws);
@@ -184,18 +194,9 @@ function doPost(e) {
 
         return responseJSON({
           status: 'success',
-          message: 'Partido actualizado para ' + cleanName,
-          player: {
-            id: searchKey,
-            name: cleanName,
-            wins, losses, draws, totalMatches: total, winRate,
-            lastResult: lastResultLabel,
-            notes: matchNote || currentRow[8],
-            history
-          }
+          message: 'Partido actualizado para ' + cleanName
         });
       } else {
-        // Nuevo rival: crear nueva fila
         const wins = matchResult === 'W' ? 1 : 0;
         const losses = matchResult === 'L' ? 1 : 0;
         const draws = matchResult === 'D' ? 1 : 0;
@@ -224,21 +225,11 @@ function doPost(e) {
 
         return responseJSON({
           status: 'success',
-          message: 'Rival ' + cleanName + ' registrado con éxito',
-          player: {
-            id: searchKey,
-            name: cleanName,
-            wins, losses, draws, totalMatches: total, winRate,
-            lastResult: lastResultLabel,
-            notes: matchNote,
-            history
-          }
+          message: 'Rival ' + cleanName + ' registrado con éxito'
         });
       }
     } else if (action === 'sync_all') {
-      // Sincronización completa masiva
       const players = body.players || [];
-      // Limpiar datos anteriores (excepto encabezado)
       const lastRow = sheet.getLastRow();
       if (lastRow > 1) {
         sheet.deleteRows(2, lastRow - 1);

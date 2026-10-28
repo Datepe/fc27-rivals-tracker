@@ -3,63 +3,103 @@
  * alojado en la cuenta de Google Drive del usuario.
  */
 
+function formatScriptUrl(rawUrl) {
+  if (!rawUrl) return '';
+  let url = rawUrl.trim();
+  // Si le falta /exec al final y termina en / o en el id
+  if (url.includes('/macros/s/') && !url.endsWith('/exec')) {
+    // Si termina con /, quitarla
+    if (url.endsWith('/')) url = url.slice(0, -1);
+    // Si no termina en /exec, añadirlo si parece ser el endpoint
+    if (!url.endsWith('/exec')) {
+      url = `${url}/exec`;
+    }
+  }
+  return url;
+}
+
+/**
+ * Prueba la conexión con el Google Apps Script
+ */
 export async function pingDriveService(scriptUrl) {
-  if (!scriptUrl || !scriptUrl.trim()) {
+  const cleanUrl = formatScriptUrl(scriptUrl);
+  if (!cleanUrl) {
     throw new Error('Debes ingresar la URL de tu Google Apps Script');
   }
 
-  const url = new URL(scriptUrl.trim());
-  url.searchParams.set('action', 'ping');
+  const urlObj = new URL(cleanUrl);
+  urlObj.searchParams.set('action', 'ping');
+  urlObj.searchParams.set('_t', Date.now().toString());
 
-  const response = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      'Accept': 'application/json'
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`Error en el servidor de Google Drive (Código: ${response.status})`);
+  let response;
+  try {
+    response = await fetch(urlObj.toString(), {
+      method: 'GET',
+      mode: 'cors',
+      redirect: 'follow'
+    });
+  } catch (netErr) {
+    throw new Error(
+      'No se pudo establecer conexión con Google. Esto ocurre casi siempre porque Google requiere que autorices los permisos de la aplicación en tu cuenta. Haz clic en el botón "Abrir enlace para autorizar permisos" para completarlo.'
+    );
   }
 
-  const data = await response.json();
-  return data;
+  if (!response.ok) {
+    throw new Error(`Google Drive respondió con error HTTP ${response.status}`);
+  }
+
+  const rawText = await response.text();
+  try {
+    const data = JSON.parse(rawText);
+    return data;
+  } catch (parseErr) {
+    // Si devuelve HTML es porque Google está mostrando la pantalla de login o advertencia de permisos
+    if (rawText.includes('<!DOCTYPE') || rawText.includes('<html')) {
+      throw new Error(
+        'Google requiere autorización de tu cuenta. Abre la URL en una nueva pestaña del navegador, inicia sesión con tu cuenta y presiona "Permitir" o "Avanzado > Continuar".'
+      );
+    }
+    throw new Error('Respuesta no válida del servidor de Google Drive');
+  }
 }
 
 /**
  * Obtener todos los rivales guardados en la hoja de Google Drive
  */
 export async function fetchPlayersFromDrive(scriptUrl) {
-  if (!scriptUrl || !scriptUrl.trim()) return [];
+  const cleanUrl = formatScriptUrl(scriptUrl);
+  if (!cleanUrl) return [];
 
-  const url = new URL(scriptUrl.trim());
-  url.searchParams.set('action', 'get_all');
-  url.searchParams.set('_t', Date.now().toString()); // evitar caché
+  const urlObj = new URL(cleanUrl);
+  urlObj.searchParams.set('action', 'get_all');
+  urlObj.searchParams.set('_t', Date.now().toString());
 
-  const response = await fetch(url.toString(), {
-    method: 'GET',
-    headers: {
-      'Accept': 'application/json'
+  try {
+    const response = await fetch(urlObj.toString(), {
+      method: 'GET',
+      mode: 'cors',
+      redirect: 'follow'
+    });
+
+    if (!response.ok) return [];
+
+    const result = await response.json();
+    if (result.status === 'success' && Array.isArray(result.data)) {
+      return result.data;
     }
-  });
-
-  if (!response.ok) {
-    throw new Error('No se pudo conectar con tu Google Drive');
+    return [];
+  } catch (err) {
+    console.warn('Error al obtener datos de Google Drive:', err);
+    return [];
   }
-
-  const result = await response.json();
-  if (result.status === 'success' && Array.isArray(result.data)) {
-    return result.data;
-  }
-  return [];
 }
 
 /**
  * Registrar un nuevo partido en Google Drive
- * match: { name: string, result: 'W'|'L'|'D', note?: string, date?: string }
  */
 export async function sendMatchToDrive(scriptUrl, match) {
-  if (!scriptUrl || !scriptUrl.trim()) return null;
+  const cleanUrl = formatScriptUrl(scriptUrl);
+  if (!cleanUrl) return null;
 
   const payload = {
     action: 'save_match',
@@ -71,45 +111,52 @@ export async function sendMatchToDrive(scriptUrl, match) {
     }
   };
 
-  // Usamos text/plain para evitar el preflight OPTIONS en Google Apps Script
-  const response = await fetch(scriptUrl.trim(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8'
-    },
-    body: JSON.stringify(payload)
-  });
+  try {
+    const response = await fetch(cleanUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8'
+      },
+      body: JSON.stringify(payload),
+      mode: 'cors',
+      redirect: 'follow'
+    });
 
-  if (!response.ok) {
-    throw new Error('Error al guardar el partido en Google Drive');
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (err) {
+    console.warn('Error al guardar partido en Google Drive:', err);
+    return null;
   }
-
-  const result = await response.json();
-  return result;
 }
 
 /**
  * Sincronizar todos los datos locales hacia Google Drive
  */
 export async function syncAllPlayersToDrive(scriptUrl, players) {
-  if (!scriptUrl || !scriptUrl.trim()) return null;
+  const cleanUrl = formatScriptUrl(scriptUrl);
+  if (!cleanUrl) return null;
 
   const payload = {
     action: 'sync_all',
     players: players
   };
 
-  const response = await fetch(scriptUrl.trim(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8'
-    },
-    body: JSON.stringify(payload)
-  });
+  try {
+    const response = await fetch(cleanUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8'
+      },
+      body: JSON.stringify(payload),
+      mode: 'cors',
+      redirect: 'follow'
+    });
 
-  if (!response.ok) {
-    throw new Error('Error al sincronizar datos con Google Drive');
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (err) {
+    console.warn('Error al sincronizar con Google Drive:', err);
+    return null;
   }
-
-  return await response.json();
 }

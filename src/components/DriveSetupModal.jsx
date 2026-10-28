@@ -8,8 +8,8 @@ import {
   AlertCircle, 
   CheckCircle2, 
   Loader2, 
-  FileSpreadsheet,
-  Unplug
+  Unplug,
+  KeyRound
 } from 'lucide-react';
 import { pingDriveService, syncAllPlayersToDrive } from '../services/driveApi';
 
@@ -28,14 +28,33 @@ export default function DriveSetupModal({
 
   if (!isOpen) return null;
 
-  // Código que debe pegar el usuario en Apps Script
+  // Código Apps Script
   const appsScriptCode = `const SHEET_NAME = 'Rivales_FC27';
 
 function getOrCreateSheet() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let ss = null;
+  try {
+    ss = SpreadsheetApp.getActiveSpreadsheet();
+  } catch (e) {
+    ss = null;
+  }
+  if (!ss) {
+    const files = DriveApp.getFilesByName('FC27_Rivales_Data');
+    if (files.hasNext()) {
+      ss = SpreadsheetApp.open(files.next());
+    } else {
+      ss = SpreadsheetApp.create('FC27_Rivales_Data');
+    }
+  }
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAME);
+    const defaultSheet = ss.getActiveSheet();
+    if (defaultSheet && defaultSheet.getLastRow() === 0) {
+      sheet = defaultSheet;
+      sheet.setName(SHEET_NAME);
+    } else {
+      sheet = ss.insertSheet(SHEET_NAME);
+    }
     const headers = ['Gamertag / Nombre', 'Victorias', 'Derrotas', 'Empates', 'Total Partidos', 'Efectividad (%)', 'Último Resultado', 'Última Fecha', 'Notas / Estilo', 'Historial Detallado'];
     sheet.appendRow(headers);
     const headerRange = sheet.getRange(1, 1, 1, headers.length);
@@ -50,7 +69,7 @@ function getOrCreateSheet() {
 
 function doGet(e) {
   try {
-    const action = e.parameter.action || 'get_all';
+    const action = (e && e.parameter && e.parameter.action) ? e.parameter.action : 'get_all';
     if (action === 'ping') {
       return responseJSON({ status: 'success', message: 'Conectado exitosamente con Google Drive' });
     }
@@ -85,16 +104,18 @@ function doGet(e) {
 function doPost(e) {
   try {
     let body;
-    if (e.postData && e.postData.contents) {
+    if (e && e.postData && e.postData.contents) {
       body = JSON.parse(e.postData.contents);
-    } else {
+    } else if (e && e.parameter) {
       body = e.parameter;
+    } else {
+      body = {};
     }
     const action = body.action || 'save_match';
     const sheet = getOrCreateSheet();
-
     if (action === 'save_match') {
       const match = body.match;
+      if (!match || !match.name) return responseJSON({ status: 'error', message: 'Falta el nombre' });
       const cleanName = match.name.trim();
       const searchKey = cleanName.toLowerCase();
       const rows = sheet.getDataRange().getValues();
@@ -108,7 +129,6 @@ function doPost(e) {
       const matchDate = match.date || new Date().toISOString();
       const matchNote = match.note || '';
       const matchResult = match.result;
-
       if (rowIndex !== -1) {
         const currentRow = rows[rowIndex - 1];
         let wins = Number(currentRow[1]) || 0;
@@ -123,7 +143,6 @@ function doPost(e) {
         let history = [];
         try { if (currentRow[9]) history = JSON.parse(currentRow[9]); } catch (e) { history = []; }
         history.unshift({ date: matchDate, result: matchResult, note: matchNote });
-
         sheet.getRange(rowIndex, 2).setValue(wins);
         sheet.getRange(rowIndex, 3).setValue(losses);
         sheet.getRange(rowIndex, 4).setValue(draws);
@@ -133,7 +152,7 @@ function doPost(e) {
         sheet.getRange(rowIndex, 8).setValue(new Date().toLocaleDateString('es-ES'));
         if (matchNote) sheet.getRange(rowIndex, 9).setValue(matchNote);
         sheet.getRange(rowIndex, 10).setValue(JSON.stringify(history));
-        return responseJSON({ status: 'success', message: 'Actualizado' });
+        return responseJSON({ status: 'success', message: 'Partido actualizado para ' + cleanName });
       } else {
         const wins = matchResult === 'W' ? 1 : 0;
         const losses = matchResult === 'L' ? 1 : 0;
@@ -143,7 +162,7 @@ function doPost(e) {
         const lastResultLabel = matchResult === 'W' ? 'Ganado' : (matchResult === 'L' ? 'Perdido' : 'Empate');
         const history = [{ date: matchDate, result: matchResult, note: matchNote }];
         sheet.appendRow([cleanName, wins, losses, draws, total, winRate, lastResultLabel, new Date().toLocaleDateString('es-ES'), matchNote, JSON.stringify(history)]);
-        return responseJSON({ status: 'success', message: 'Guardado' });
+        return responseJSON({ status: 'success', message: 'Rival ' + cleanName + ' registrado con éxito' });
       }
     } else if (action === 'sync_all') {
       const allPlayers = body.players || [];
@@ -152,7 +171,7 @@ function doPost(e) {
       allPlayers.forEach(p => {
         sheet.appendRow([p.name, p.wins || 0, p.losses || 0, p.draws || 0, p.totalMatches || 0, p.winRate || 0, p.lastResult || '', p.lastDate || new Date().toLocaleDateString('es-ES'), p.notes || '', JSON.stringify(p.history || [])]);
       });
-      return responseJSON({ status: 'success', message: 'Sincronizado' });
+      return responseJSON({ status: 'success', message: 'Sincronización masiva completada' });
     }
     return responseJSON({ status: 'error', message: 'Acción no reconocida' });
   } catch (error) {
@@ -170,8 +189,19 @@ function responseJSON(data) {
     setTimeout(() => setCopied(false), 2500);
   };
 
+  // Asegurar formato de la URL
+  const getFormattedUrl = () => {
+    let clean = url.trim();
+    if (clean.includes('/macros/s/') && !clean.endsWith('/exec')) {
+      if (clean.endsWith('/')) clean = clean.slice(0, -1);
+      if (!clean.endsWith('/exec')) clean = `${clean}/exec`;
+    }
+    return clean;
+  };
+
   const handleTestAndConnect = async () => {
-    if (!url.trim()) {
+    const finalUrl = getFormattedUrl();
+    if (!finalUrl) {
       setTestResult({ success: false, message: 'Por favor escribe la URL de tu Web App' });
       return;
     }
@@ -179,26 +209,25 @@ function responseJSON(data) {
     setTestResult(null);
 
     try {
-      await pingDriveService(url);
+      await pingDriveService(finalUrl);
       setTestResult({
         success: true,
         message: '¡Conexión exitosa! Tu app ahora sincroniza con Google Drive.'
       });
       onSaveConfig({
-        scriptUrl: url.trim(),
+        scriptUrl: finalUrl,
         lastSync: new Date().toISOString(),
         autoSync: true
       });
 
-      // Si tenemos jugadores locales, sincronizarlos
       if (players && players.length > 0) {
-        await syncAllPlayersToDrive(url.trim(), players);
+        await syncAllPlayersToDrive(finalUrl, players);
         if (onSyncComplete) onSyncComplete();
       }
     } catch (err) {
       setTestResult({
         success: false,
-        message: 'No se pudo conectar: Asegúrate de que al implementar seleccionaste "Cualquier usuario" (Anyone).'
+        message: err.message || 'Error de conexión'
       });
     } finally {
       setIsTesting(false);
@@ -214,6 +243,8 @@ function responseJSON(data) {
     setUrl('');
     setTestResult(null);
   };
+
+  const formattedUrl = getFormattedUrl();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm overflow-y-auto">
@@ -252,7 +283,7 @@ function responseJSON(data) {
           {/* Pasos de configuración */}
           <div className="space-y-4">
             <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300">
-              Guía de configuración en 4 pasos (solo 1 minuto):
+              Pasos para conectar:
             </h3>
 
             {/* Paso 1 */}
@@ -260,11 +291,18 @@ function responseJSON(data) {
               <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-fc-neon text-black font-black text-xs">
                 1
               </span>
-              <div className="text-xs text-slate-300">
-                <p className="font-semibold text-white">Crea una nueva hoja de cálculo en Google Drive</p>
-                <p className="text-slate-400 mt-0.5">
-                  Ve a <a href="https://sheets.new" target="_blank" rel="noreferrer" className="text-fc-cyan underline inline-flex items-center">sheets.new <ExternalLink className="h-3 w-3 ml-0.5" /></a> para abrir una hoja nueva en blanco.
+              <div className="text-xs text-slate-300 w-full">
+                <p className="font-semibold text-white">Copia el código actualizado en Apps Script</p>
+                <p className="text-slate-400 mt-0.5 mb-2">
+                  Si creaste una hoja de cálculo, ve a <strong>Extensiones &gt; Apps Script</strong> y pega este código:
                 </p>
+                <button
+                  onClick={handleCopyCode}
+                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-fc-card hover:bg-fc-border border border-fc-neon/50 text-fc-neon text-xs font-bold transition shadow-sm"
+                >
+                  {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+                  <span>{copied ? '¡Código copiado al portapapeles!' : 'Copiar código para Apps Script'}</span>
+                </button>
               </div>
             </div>
 
@@ -273,31 +311,48 @@ function responseJSON(data) {
               <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-fc-neon text-black font-black text-xs">
                 2
               </span>
-              <div className="text-xs text-slate-300 w-full">
-                <p className="font-semibold text-white">Abre el editor de scripts</p>
-                <p className="text-slate-400 mt-0.5 mb-2">
-                  En el menú superior de la hoja, haz clic en: <span className="font-bold text-slate-200">Extensiones &gt; Apps Script</span>.
+              <div className="text-xs text-slate-300">
+                <p className="font-semibold text-white">Implementación de la Aplicación web</p>
+                <p className="text-slate-400 mt-0.5">
+                  Haz clic en <strong className="text-slate-200">Implementar &gt; Administrar las implementaciones</strong>.
+                  Asegúrate de copiar la URL con el botón azul <strong>&quot;Copiar&quot;</strong> que está debajo de la URL (para que no se corte y termine en <code>/exec</code>).
                 </p>
-                <button
-                  onClick={handleCopyCode}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-fc-card hover:bg-fc-border border border-fc-neon/50 text-fc-neon text-xs font-bold transition shadow-sm"
-                >
-                  {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
-                  <span>{copied ? '¡Código copiado al portapapeles!' : 'Copiar código para pegar en Apps Script'}</span>
-                </button>
               </div>
             </div>
 
-            {/* Paso 3 */}
-            <div className="flex items-start space-x-3 p-3 rounded-xl bg-fc-bg border border-fc-border">
-              <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-fc-neon text-black font-black text-xs">
+            {/* Paso 3: Autorizar Permisos en el Navegador */}
+            <div className="flex items-start space-x-3 p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/30">
+              <span className="flex-shrink-0 flex items-center justify-center h-6 w-6 rounded-full bg-emerald-500 text-black font-black text-xs">
                 3
               </span>
-              <div className="text-xs text-slate-300">
-                <p className="font-semibold text-white">Implementar como Aplicación Web</p>
-                <p className="text-slate-400 mt-0.5">
-                  Haz clic en el botón azul <strong className="text-slate-200">Implementar &gt; Nueva implementación</strong>. Elige el tipo <strong>Aplicación web</strong>, y en <em>&quot;Quién tiene acceso&quot;</em> selecciona: <strong className="text-emerald-400">&quot;Cualquier usuario&quot; (Anyone)</strong>.
+              <div className="text-xs text-slate-200 w-full">
+                <p className="font-bold text-white flex items-center gap-1.5">
+                  <KeyRound className="h-4 w-4 text-emerald-400" />
+                  <span>IMPORTANTE: Autorizar permisos de Google (Solo la 1ª vez)</span>
                 </p>
+                <p className="text-slate-300 mt-1">
+                  Google exige que abras el enlace en una pestaña para conceder permisos a tu cuenta. Haz clic en el botón a continuación para abrirlo:
+                </p>
+                {formattedUrl ? (
+                  <div className="mt-2.5">
+                    <a
+                      href={formattedUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 text-black font-extrabold text-xs shadow-win hover:bg-emerald-400 transition"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                      <span>Abrir URL en nueva pestaña para Autorizar</span>
+                    </a>
+                    <span className="block text-[11px] text-slate-400 mt-1">
+                      (Si Google te muestra una advertencia de seguridad, haz clic en <em>&quot;Avanzado&quot;</em> y luego en <em>&quot;Ir a ... (no seguro)&quot;</em> y <em>&quot;Permitir&quot;</em>).
+                    </span>
+                  </div>
+                ) : (
+                  <p className="text-slate-400 italic mt-1">
+                    (Pega la URL abajo en el Paso 4 para activar este botón de autorización)
+                  </p>
+                )}
               </div>
             </div>
 
@@ -307,9 +362,9 @@ function responseJSON(data) {
                 4
               </span>
               <div className="text-xs text-slate-300 w-full">
-                <p className="font-semibold text-white">Pega la URL aquí abajo</p>
+                <p className="font-semibold text-white">Pega la URL y pulsa Conectar</p>
                 <p className="text-slate-400 mt-0.5">
-                  Copia la URL de la aplicación web generada (termina en <code>/exec</code>) y pégala en el campo a continuación:
+                  Una vez autorizada, vuelve aquí y haz clic en <strong>Guardar y Conectar</strong>.
                 </p>
               </div>
             </div>
@@ -326,7 +381,7 @@ function responseJSON(data) {
                 type="url"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://script.google.com/macros/s/AKfycb.../exec"
+                placeholder="https://script.google.com/macros/s/.../exec"
                 className="flex-1 px-4 py-2.5 bg-fc-bg border border-fc-border rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-fc-neon text-xs font-mono"
               />
               <button
@@ -337,7 +392,7 @@ function responseJSON(data) {
                 {isTesting ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span>Conectando...</span>
+                    <span>Verificando...</span>
                   </>
                 ) : (
                   <>
@@ -349,17 +404,19 @@ function responseJSON(data) {
             </div>
 
             {testResult && (
-              <div className={`p-3 rounded-xl border text-xs flex items-center space-x-2 ${
+              <div className={`p-3 rounded-xl border text-xs flex items-start space-x-2 ${
                 testResult.success
                   ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
                   : 'bg-red-500/15 border-red-500/40 text-red-300'
               }`}>
                 {testResult.success ? (
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400 mt-0.5" />
                 ) : (
-                  <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                  <AlertCircle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
                 )}
-                <span>{testResult.message}</span>
+                <div className="flex-1">
+                  <p className="font-semibold">{testResult.message}</p>
+                </div>
               </div>
             )}
 
